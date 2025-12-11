@@ -86,7 +86,7 @@
                 >
                     <i class="fa-solid fa-gamepad text-sky-400"></i>
                 </span>
-            <span>Gaming Squad Hub</span>
+                <span>Gaming Squad Hub</span>
             </h1>
             <p class="text-xs md:text-sm text-slate-400 mt-2">
                 同一頁搞掂約戰月曆、Steam 遊戲投票同戰犯榜。
@@ -228,6 +228,9 @@
                             你已經加入嘅房間，再按一次就會「取消報名」。
                         </li>
                         <li>
+                            只有<strong>建立該時段嘅人</strong>可以修改／刪除個房。
+                        </li>
+                        <li>
                             當某個時段由
                             <span class="text-yellow-300 font-semibold">4 → 5 人</span>，
                             會向 Discord Webhook 發送提示（時間用 UTC 顯示）。
@@ -290,7 +293,7 @@
                         <span>戰犯榜</span>
                     </h2>
                     <p class="text-xs text-slate-400 mt-1">
-                        輕鬆加加減減，紀錄今晚邊個最多戰犯操作。
+                        每位玩家對同一個人，每 24 小時只可以投 + / - 一次。
                     </p>
                 </div>
             </div>
@@ -320,7 +323,7 @@
     // === 全域狀態 ===
     let currentUser = localStorage.getItem("currentUser") || null;
 
-    // availabilityDocs: [{ id, startAtMs, note, participants }]
+    // availabilityDocs: [{ id, startAtMs, note, participants, owner }]
     let availabilityDocs = [];
     let votesDocs = [];
     let shameMap = {};
@@ -621,6 +624,8 @@
                     startAtMs: startAtMs,
                     note: note || "",
                     participants: [],
+                    owner: currentUser,
+                    createdAt: firebase.firestore.FieldValue.serverTimestamp(),
                 };
             } else {
                 data = doc.data() || {};
@@ -645,6 +650,11 @@
                         data.startAt =
                             firebase.firestore.Timestamp.fromDate(d);
                     }
+                }
+
+                if (!data.owner) {
+                    // 舊 slot 沒 owner，就當第一次操作嘅人係 owner
+                    data.owner = currentUser;
                 }
 
                 if (note && note.trim()) {
@@ -715,6 +725,7 @@
                 const isJoined =
                     currentUser && participants.includes(currentUser);
                 const isFull = count >= 5 && !isJoined;
+                const isOwner = currentUser && slot.owner === currentUser;
 
                 const btnText = isJoined
                     ? "取消報名"
@@ -735,6 +746,31 @@
 
                 const timeText = formatLocalTimeFromMs(slot.startAtMs);
 
+                const ownerHtml = slot.owner
+                    ? `<div class="text-[10px] text-slate-500">建立者：${escapeHtml(
+                          slot.owner
+                      )}</div>`
+                    : "";
+
+                const manageHtml = isOwner
+                    ? `
+                        <div class="flex gap-1 mt-1 justify-end">
+                            <button
+                                class="px-2 py-1 rounded-full bg-slate-800 hover:bg-slate-700 text-[11px]"
+                                onclick="editSlot('${slot.id}')"
+                            >
+                                修改
+                            </button>
+                            <button
+                                class="px-2 py-1 rounded-full bg-rose-600 hover:bg-rose-500 text-[11px]"
+                                onclick="deleteSlot('${slot.id}')"
+                            >
+                                刪除
+                            </button>
+                        </div>
+                    `
+                    : "";
+
                 return `
                 <div class="bg-slate-900/60 border border-slate-700/80 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
                     <div class="space-y-1">
@@ -750,8 +786,9 @@
                                     : "暫時未有人加入"
                             }
                         </div>
+                        ${ownerHtml}
                     </div>
-                    <div class="flex items-center gap-3 sm:flex-col sm:items-end">
+                    <div class="flex flex-col items-end gap-1">
                         ${
                             isFull
                                 ? '<span class="text-[10px] text-yellow-400 font-bold">FULL SQUAD</span>'
@@ -766,11 +803,135 @@
                         >
                             ${btnText}
                         </button>
+                        ${manageHtml}
                     </div>
                 </div>
             `;
             })
             .join("");
+    }
+
+    async function editSlot(slotId) {
+        if (!currentUser) {
+            alert("請先設定用戶名。");
+            openUserModal(false);
+            return;
+        }
+        const slot = availabilityDocs.find((s) => s.id === slotId);
+        if (!slot) {
+            alert("找不到這個時段，可能已被刪除。");
+            return;
+        }
+        if (slot.owner && slot.owner !== currentUser) {
+            alert("只有建立呢個時段的人先可以修改。");
+            return;
+        }
+
+        const currentTime = formatLocalTimeFromMs(slot.startAtMs);
+        const currentNote = slot.note || "";
+
+        const newTime = prompt(
+            "輸入新時間（24 小時制 HH:MM）：",
+            currentTime
+        );
+        if (newTime === null) return; // user cancelled
+        const timeTrim = newTime.trim();
+        if (!/^\d{2}:\d{2}$/.test(timeTrim)) {
+            alert("時間格式唔正確，請用 HH:MM，例如 20:30。");
+            return;
+        }
+
+        const newNote = prompt(
+            "輸入新備註（可以留空）：",
+            currentNote
+        );
+        if (newNote === null) return;
+
+        // 計算新時間（保留原本日期）
+        const d = new Date(slot.startAtMs);
+        const [hh, mm] = timeTrim.split(":").map(Number);
+        const newDate = new Date(
+            d.getFullYear(),
+            d.getMonth(),
+            d.getDate(),
+            hh,
+            mm,
+            0,
+            0
+        );
+        const newStartAtMs = newDate.getTime();
+
+        const oldId = slot.id;
+        const newId = String(newStartAtMs);
+
+        try {
+            await db.runTransaction(async (tx) => {
+                const oldRef = db.collection("availability").doc(oldId);
+                const oldSnap = await tx.get(oldRef);
+                if (!oldSnap.exists) {
+                    throw new Error("NOT_FOUND");
+                }
+                const oldData = oldSnap.data() || {};
+                if (oldData.owner && oldData.owner !== currentUser) {
+                    throw new Error("NOT_OWNER");
+                }
+
+                // 只改備註 & 時間
+                const dataToMove = { ...oldData };
+                dataToMove.note = newNote.trim();
+                dataToMove.startAtMs = newStartAtMs;
+                dataToMove.startAt =
+                    firebase.firestore.Timestamp.fromDate(newDate);
+
+                if (newId === oldId) {
+                    // 只修改內容
+                    tx.set(oldRef, dataToMove, { merge: true });
+                } else {
+                    const newRef = db.collection("availability").doc(newId);
+                    const newSnap = await tx.get(newRef);
+                    if (newSnap.exists) {
+                        throw new Error("TIME_CONFLICT");
+                    }
+                    tx.set(newRef, dataToMove);
+                    tx.delete(oldRef);
+                }
+            });
+        } catch (e) {
+            console.error(e);
+            if (e.message === "NOT_OWNER") {
+                alert("只有建立呢個時段的人先可以修改。");
+            } else if (e.message === "TIME_CONFLICT") {
+                alert("你改後嘅時間已經有另一個時段使用，請改其他時間。");
+            } else if (e.message !== "NOT_FOUND") {
+                alert("修改時段失敗，請稍後再試。");
+            }
+        }
+    }
+
+    async function deleteSlot(slotId) {
+        if (!currentUser) {
+            alert("請先設定用戶名。");
+            openUserModal(false);
+            return;
+        }
+        if (!confirm("確定要刪除呢個時段？所有報名都會一齊刪除。")) {
+            return;
+        }
+
+        const ref = db.collection("availability").doc(slotId);
+        try {
+            const snap = await ref.get();
+            if (!snap.exists) return;
+            const data = snap.data() || {};
+            if (data.owner && data.owner !== currentUser) {
+                alert("只有建立呢個時段的人先可以刪除。");
+                return;
+            }
+            await ref.delete();
+        } catch (e) {
+            console.error(e);
+            alert("刪除時段失敗，請稍後再試。");
+        }
     }
 
     // === Discord 通知 ===
@@ -1024,11 +1185,8 @@
         const container = document.getElementById("shame-container");
         if (!container) return;
 
-        const namesSet = new Set([
-            ...USERS,
-            ...Object.keys(shameMap),
-        ]);
-        const names = Array.from(namesSet);
+        // 只顯示 USERS 陣列入面嗰幾個人，避免顯示 Firestore random ID
+        const names = USERS.slice();
 
         if (!names.length) {
             container.innerHTML = `<p class="text-slate-500 text-xs md:text-sm py-2">
@@ -1084,13 +1242,69 @@
     }
 
     async function updateShame(name, delta) {
-        const docRef = db.collection("shame").doc(name);
-        await docRef.set(
-            {
-                count: firebase.firestore.FieldValue.increment(delta),
-            },
-            { merge: true }
-        );
+        if (!currentUser) {
+            alert("請先設定用戶名。");
+            openUserModal(false);
+            return;
+        }
+
+        const shameRef = db.collection("shame").doc(name);
+        const voteRef = db
+            .collection("shameVotes")
+            .doc(`${name}__${currentUser}`);
+
+        const COOLDOWN_MS = 24 * 60 * 60 * 1000;
+
+        try {
+            await db.runTransaction(async (tx) => {
+                const voteSnap = await tx.get(voteRef);
+                const nowMs = Date.now();
+
+                if (voteSnap.exists) {
+                    const vData = voteSnap.data() || {};
+                    if (
+                        vData.lastVoteAt &&
+                        typeof vData.lastVoteAt.toDate === "function"
+                    ) {
+                        const lastMs =
+                            vData.lastVoteAt.toDate().getTime();
+                        if (nowMs - lastMs < COOLDOWN_MS) {
+                            throw new Error("COOLDOWN");
+                        }
+                    }
+                }
+
+                tx.set(
+                    shameRef,
+                    {
+                        count: firebase.firestore.FieldValue.increment(
+                            delta
+                        ),
+                    },
+                    { merge: true }
+                );
+
+                tx.set(
+                    voteRef,
+                    {
+                        lastVoteAt:
+                            firebase.firestore.Timestamp.fromMillis(
+                                nowMs
+                            ),
+                    },
+                    { merge: true }
+                );
+            });
+        } catch (e) {
+            console.error(e);
+            if (e.message === "COOLDOWN") {
+                alert(
+                    "你已經對呢個玩家投過票，需等待 24 小時先可以再投。"
+                );
+            } else {
+                alert("更新戰犯榜失敗，請稍後再試。");
+            }
+        }
     }
 
     // === Firestore 即時監聽 ===
@@ -1129,6 +1343,7 @@
                         id: d.id,
                         startAtMs,
                         note: data.note || "",
+                        owner: data.owner || null,
                         participants: Array.isArray(data.participants)
                             ? data.participants
                             : [],
