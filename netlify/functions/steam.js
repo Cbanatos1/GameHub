@@ -1,6 +1,7 @@
 // netlify/functions/steam.js
 const https = require("https");
 
+// 小工具：用 Node 原生 https GET JSON
 function getJson(url) {
   return new Promise((resolve, reject) => {
     const req = https.get(url, (res) => {
@@ -35,9 +36,11 @@ function getJson(url) {
 }
 
 exports.handler = async function (event, context) {
+  // 只允許 POST
   if (event.httpMethod !== "POST") {
     return {
       statusCode: 405,
+      headers: { "Content-Type": "text/plain; charset=utf-8" },
       body: "Method Not Allowed",
     };
   }
@@ -45,24 +48,27 @@ exports.handler = async function (event, context) {
   try {
     const body = JSON.parse(event.body || "{}");
     const appId = body.appId;
-    const url = body.url;
+    const urlFromClient = body.url;
 
     if (!appId) {
       return {
         statusCode: 400,
+        headers: { "Content-Type": "text/plain; charset=utf-8" },
         body: "Missing appId in request body.",
       };
     }
 
-    // 用香港區＋繁中
+    // 用香港區＋繁中（你可以改 cc / l）
     const apiUrl = `https://store.steampowered.com/api/appdetails?appids=${appId}&cc=hk&l=tchinese`;
 
     const json = await getJson(apiUrl);
     const wrapper = json[appId];
 
     if (!wrapper || !wrapper.success) {
+      // appid 唔存在 / 冇 store page
       return {
         statusCode: 404,
+        headers: { "Content-Type": "text/plain; charset=utf-8" },
         body: `Steam app ${appId} not found or success=false.`,
       };
     }
@@ -84,9 +90,12 @@ exports.handler = async function (event, context) {
       priceText = "價格未提供";
     }
 
+    // 回前端用嘅 payload
     const payload = {
       appId,
-      url: url || `https://store.steampowered.com/app/${appId}`,
+      url:
+        urlFromClient ||
+        `https://store.steampowered.com/app/${appId}`,
       name: data.name || "",
       headerImage: data.header_image || "",
       shortDescription: data.short_description || "",
@@ -102,6 +111,7 @@ exports.handler = async function (event, context) {
     console.error("Steam function error:", err);
     return {
       statusCode: 500,
+      headers: { "Content-Type": "text/plain; charset=utf-8" },
       body: `Failed to fetch Steam metadata: ${err.toString()}`,
     };
   }
